@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { motion } from "framer-motion";
-import { Camera, MapPin, AlertTriangle, Upload } from "lucide-react";
+import { Camera, MapPin, Upload, Brain, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { useAIDogAnalysis } from "@/hooks/useAIDogAnalysis";
+import AIAssessmentCard from "@/components/AIAssessmentCard";
 
 const ReportDog = () => {
   const { user } = useAuth();
@@ -24,26 +26,79 @@ const ReportDog = () => {
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [gettingLocation, setGettingLocation] = useState(false);
 
+  const { analyzing, assessment, analyzePhoto, clearAssessment } = useAIDogAnalysis();
+
+  // Auto-fetch location on mount
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    setGettingLocation(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setLocation(coords);
+        setGettingLocation(false);
+        toast.success("Location detected automatically!");
+        // Reverse geocode
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${coords.lat}&lon=${coords.lng}&format=json`
+          );
+          const data = await res.json();
+          if (data.display_name) {
+            setAddress(data.display_name);
+          }
+        } catch { /* ignore geocoding errors */ }
+      },
+      () => {
+        setGettingLocation(false);
+      }
+    );
+  }, []);
+
   if (!user) {
     navigate("/auth");
     return null;
   }
 
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setPhotoFile(file);
       setPhotoPreview(URL.createObjectURL(file));
+      clearAssessment();
+      // Auto-analyze with AI
+      await analyzePhoto(file);
     }
+  };
+
+  const handleApplyAI = () => {
+    if (!assessment) return;
+    setCategory(assessment.suggestedCategory);
+    setSeverity(assessment.suggestedSeverity);
+    if (!description) {
+      const parts = [assessment.description];
+      if (assessment.visibleInjuries.length) parts.push(`Injuries: ${assessment.visibleInjuries.join(", ")}`);
+      if (assessment.healthConcerns.length) parts.push(`Concerns: ${assessment.healthConcerns.join(", ")}`);
+      setDescription(parts.join("\n"));
+    }
+    toast.success("AI suggestions applied!");
   };
 
   const getLocation = () => {
     setGettingLocation(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      async (pos) => {
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setLocation(coords);
         setGettingLocation(false);
         toast.success("Location captured!");
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${coords.lat}&lon=${coords.lng}&format=json`
+          );
+          const data = await res.json();
+          if (data.display_name) setAddress(data.display_name);
+        } catch { /* ignore */ }
       },
       () => {
         toast.error("Could not get location. Please enter address manually.");
@@ -98,37 +153,54 @@ const ReportDog = () => {
       <div className="container mx-auto max-w-2xl">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="font-display text-3xl font-bold mb-2">Report a Street Dog</h1>
-          <p className="text-muted-foreground mb-8">Help us locate and rescue dogs in need.</p>
+          <p className="text-muted-foreground mb-8">Upload a photo and our AI will help identify the dog's condition.</p>
 
           <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Photo */}
+            {/* Photo + AI */}
             <div>
-              <Label className="text-sm font-medium">Dog Photo</Label>
+              <Label className="text-sm font-medium flex items-center gap-2">
+                <Brain className="h-4 w-4 text-primary" /> AI Dog Scanner
+              </Label>
               <div className="mt-2">
                 {photoPreview ? (
                   <div className="relative rounded-xl overflow-hidden">
                     <img src={photoPreview} alt="Dog preview" className="w-full h-64 object-cover" />
+                    {analyzing && (
+                      <div className="absolute inset-0 bg-background/70 flex flex-col items-center justify-center gap-2">
+                        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                        <span className="text-sm font-medium text-primary">AI is analyzing...</span>
+                      </div>
+                    )}
                     <button
                       type="button"
-                      onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}
+                      onClick={() => { setPhotoFile(null); setPhotoPreview(null); clearAssessment(); }}
                       className="absolute top-2 right-2 bg-background/80 rounded-full p-2 text-sm"
                     >
                       ✕
                     </button>
                   </div>
                 ) : (
-                  <label className="flex flex-col items-center justify-center h-48 glass rounded-xl cursor-pointer hover:border-primary/50 transition-colors">
-                    <Camera className="h-10 w-10 text-muted-foreground mb-2" />
-                    <span className="text-sm text-muted-foreground">Click to upload photo</span>
-                    <input type="file" accept="image/*" onChange={handlePhotoChange} className="hidden" />
+                  <label className="flex flex-col items-center justify-center h-48 glass rounded-xl cursor-pointer hover:border-primary/50 transition-colors border-2 border-dashed border-muted-foreground/30">
+                    <Camera className="h-10 w-10 text-primary mb-2" />
+                    <span className="text-sm font-medium text-foreground">Take Photo or Upload</span>
+                    <span className="text-xs text-muted-foreground mt-1">AI will auto-detect the dog's condition</span>
+                    <input type="file" accept="image/*" capture="environment" onChange={handlePhotoChange} className="hidden" />
                   </label>
                 )}
               </div>
             </div>
 
-            {/* Location */}
+            {/* AI Assessment */}
+            {assessment && (
+              <AIAssessmentCard assessment={assessment} onApply={handleApplyAI} />
+            )}
+
+            {/* Location - auto-fetched */}
             <div>
-              <Label className="text-sm font-medium">Location</Label>
+              <Label className="text-sm font-medium flex items-center gap-2">
+                <MapPin className="h-4 w-4 text-primary" /> Location
+                {gettingLocation && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+              </Label>
               <div className="mt-2 flex gap-2">
                 <Input
                   placeholder="Enter address or area"
@@ -142,7 +214,7 @@ const ReportDog = () => {
                 </Button>
               </div>
               {location && (
-                <p className="text-xs text-accent mt-1">📍 GPS: {location.lat.toFixed(4)}, {location.lng.toFixed(4)}</p>
+                <p className="text-xs text-primary mt-1">📍 GPS: {location.lat.toFixed(4)}, {location.lng.toFixed(4)}</p>
               )}
             </div>
 
@@ -189,7 +261,7 @@ const ReportDog = () => {
 
             <Button
               type="submit"
-              disabled={loading}
+              disabled={loading || analyzing}
               className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-semibold"
               size="lg"
             >
